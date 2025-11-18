@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import {project4Dto3D} from "./core/hyper.ts";
+import {applyMat4ToVec4, project4Dto3D} from "./core/hyper.ts";
 import {generateTesseractEdges, generateTesseractVertices} from "./core/hyper.ts";
 
 // Scene
@@ -25,14 +25,14 @@ light.position.set(10, 10, 10);
 scene.add(light);
 
 // Grid ground
-// const size = 100;
-// const divisions = 100;
-// const gridHelper = new THREE.GridHelper(size, divisions, 0x444444, 0x888888);
-// scene.add(gridHelper);
+const size = 100;
+const divisions = 10;
+const gridHelper = new THREE.GridHelper(size, divisions, 0x444444, 0x888888);
+scene.add(gridHelper);
 
 /////////////////////////////////////////////////////////
 
-const verts4D = generateTesseractVertices(4); // size = 4
+const verts4D = generateTesseractVertices(30);
 const edges = generateTesseractEdges(verts4D);
 
 const positions = new Float32Array(edges.length * 2 * 3);
@@ -70,9 +70,12 @@ geometry.attributes.color.needsUpdate = true;
 let camera4D = [0,0,0,0];
 function updateTesseract() {
     let ptr = 0;
-    for (const [i1,i2] of edges) {
-        const p1 = project4Dto3D(verts4D[i1], camera4D);
-        const p2 = project4Dto3D(verts4D[i2], camera4D);
+    for (const [i1, i2] of edges) {
+        const rv1 = applyMat4ToVec4(tesseractRotationMat, verts4D[i1]);
+        const rv2 = applyMat4ToVec4(tesseractRotationMat, verts4D[i2]);
+
+        const p1 = project4Dto3D(rv1, [0,0,0,0]); // camera stays purely 3D, so cam4D = [0,0,0,0]
+        const p2 = project4Dto3D(rv2, [0,0,0,0]);
 
         positions[ptr++] = p1.x;
         positions[ptr++] = p1.y;
@@ -84,6 +87,76 @@ function updateTesseract() {
     }
     geometry.attributes.position.needsUpdate = true;
 }
+
+// 4x4 identity
+function mat4Identity() {
+    return [
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1
+    ];
+}
+
+// multiply two 4x4 matrices
+function mat4Multiply(a, b) {
+    const out = new Array(16).fill(0);
+    for (let r=0; r<4; r++)
+        for (let c=0; c<4; c++)
+            for (let k=0; k<4; k++)
+                out[r*4+c] += a[r*4+k]*b[k*4+c];
+    return out;
+}
+
+// rotation matrix in plane (i,j)
+function rotationMatrix4(i, j, angle) {
+    const R = mat4Identity();
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    R[i*4+i] = c; R[i*4+j] = -s;
+    R[j*4+i] = s; R[j*4+j] = c;
+    return R;
+}
+
+let tesseractRotationMat = mat4Identity();
+
+let dragging = false;
+let lastX = 0;
+let lastY = 0;
+const sensitivity = 0.01;
+
+renderer.domElement.addEventListener('pointerdown', (ev) => {
+    dragging = true;
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+    ev.target.setPointerCapture(ev.pointerId);
+});
+renderer.domElement.addEventListener('pointermove', (ev) => {
+    if (!dragging) return;
+    const dx = ev.clientX - lastX;
+    const dy = ev.clientY - lastY;
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+
+    // basic rotation
+    const a = dx * sensitivity;
+    const b = dy * sensitivity;
+
+    let r1, r2;
+    if (ev.shiftKey) {
+        // shift = rotate in W planes
+        r1 = rotationMatrix4(0, 3, a); // X-W
+        r2 = rotationMatrix4(1, 3, b); // Y-W
+    } else {
+        // normal = rotate in 3D planes
+        r1 = rotationMatrix4(0,1,a); // X-Y
+        r2 = rotationMatrix4(0,2,b); // X-Z
+    }
+
+    tesseractRotationMat = mat4Multiply(r2, mat4Multiply(r1, tesseractRotationMat));
+});
+renderer.domElement.addEventListener('pointerup', () => dragging = false);
+renderer.domElement.addEventListener('pointercancel', () => dragging = false);
 
 
 /////////////////////////////////////////////////////////
@@ -114,6 +187,7 @@ function animate() {
     requestAnimationFrame(animate);
     updateCamera();
     updateTesseract();
+    updateTesseractRotation();
     renderer.render(scene, camera);
 }
 
@@ -143,6 +217,29 @@ function updateCamera() {
     if (keys.s) camera.position.add(forward.clone().multiplyScalar(-moveSpeed));
     if (keys.a) camera.position.add(rightVec.clone().multiplyScalar(-moveSpeed));
     if (keys.d) camera.position.add(rightVec.clone().multiplyScalar(moveSpeed));
+}
+
+function updateTesseractRotation() {
+    let r1: number[], r2: number[];
+
+    if (rotationKeys.ArrowLeft || rotationKeys.ArrowRight || rotationKeys.ArrowUp || rotationKeys.ArrowDown) {
+        if (window.event?.shiftKey) {
+            const a = (rotationKeys.ArrowLeft ? rotationSpeed : 0) - (rotationKeys.ArrowRight ? rotationSpeed : 0);
+            const b = (rotationKeys.ArrowUp ? rotationSpeed : 0) - (rotationKeys.ArrowDown ? rotationSpeed : 0);
+
+            r1 = rotationMatrix4(0, 3, a); // X-W
+            r2 = rotationMatrix4(1, 3, b); // Y-W
+        } else {
+            // normal 3D rotation
+            const a = (rotationKeys.ArrowLeft ? rotationSpeed : 0) - (rotationKeys.ArrowRight ? rotationSpeed : 0);
+            const b = (rotationKeys.ArrowUp ? rotationSpeed : 0) - (rotationKeys.ArrowDown ? rotationSpeed : 0);
+
+            r1 = rotationMatrix4(0, 1, a); // X-Y
+            r2 = rotationMatrix4(0, 2, b); // X-Z
+        }
+
+        tesseractRotationMat = mat4Multiply(r2, mat4Multiply(r1, tesseractRotationMat));
+    }
 }
 
 animate();
