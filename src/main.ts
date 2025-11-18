@@ -25,14 +25,14 @@ light.position.set(10, 10, 10);
 scene.add(light);
 
 // Grid ground
-const size = 100;
+const size = 300;
 const divisions = 10;
 const gridHelper = new THREE.GridHelper(size, divisions, 0x444444, 0x888888);
 scene.add(gridHelper);
 
 /////////////////////////////////////////////////////////
 
-const verts4D = generateTesseractVertices(30);
+const verts4D = generateTesseractVertices(100);
 const edges = generateTesseractEdges(verts4D);
 
 const positions = new Float32Array(edges.length * 2 * 3);
@@ -77,13 +77,23 @@ function updateTesseract() {
         const p1 = project4Dto3D(rv1, [0,0,0,0]); // camera stays purely 3D, so cam4D = [0,0,0,0]
         const p2 = project4Dto3D(rv2, [0,0,0,0]);
 
-        positions[ptr++] = p1.x;
-        positions[ptr++] = p1.y;
-        positions[ptr++] = p1.z;
+        // positions[ptr++] = p1.x;
+        // positions[ptr++] = p1.y;
+        // positions[ptr++] = p1.z;
+        //
+        // positions[ptr++] = p2.x;
+        // positions[ptr++] = p2.y;
+        // positions[ptr++] = p2.z;
 
-        positions[ptr++] = p2.x;
-        positions[ptr++] = p2.y;
-        positions[ptr++] = p2.z;
+        const tesseractOffset = new THREE.Vector3(0, 200, 0); // y = 15, above the grid
+        positions[ptr++] = p1.x + tesseractOffset.x;
+        positions[ptr++] = p1.y + tesseractOffset.y;
+        positions[ptr++] = p1.z + tesseractOffset.z;
+
+        positions[ptr++] = p2.x + tesseractOffset.x;
+        positions[ptr++] = p2.y + tesseractOffset.y;
+        positions[ptr++] = p2.z + tesseractOffset.z;
+
     }
     geometry.attributes.position.needsUpdate = true;
 }
@@ -162,7 +172,7 @@ renderer.domElement.addEventListener('pointercancel', () => dragging = false);
 /////////////////////////////////////////////////////////
 
 // Movement
-const moveSpeed = 0.5;
+const moveSpeed = 2;
 const keys = { w: false, a: false, s: false, d: false };
 
 // Rotation
