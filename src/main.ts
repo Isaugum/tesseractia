@@ -1,104 +1,10 @@
 import * as THREE from 'three';
-import {applyMat4ToVec4, project4Dto3D} from "./core/hyper.ts";
-import {generateTesseractEdges, generateTesseractVertices} from "./core/hyper.ts";
+// We will define necessary math locally to ensure Camera logic holds up
+// independent of your external imports.
 
-// Scene
-const scene = new THREE.Scene();
+// --- MATH UTILS ---------------------------------------------------------
 
-// Camera
-const camera = new THREE.PerspectiveCamera(
-    75,
-    window.innerWidth / window.innerHeight,
-    0.1,
-    1000
-);
-camera.position.set(0, 5, 10);
-
-// Renderer
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
-
-// Light
-const light = new THREE.DirectionalLight(0xffffff, 1);
-light.position.set(10, 10, 10);
-scene.add(light);
-
-// Grid ground
-const size = 300;
-const divisions = 10;
-const gridHelper = new THREE.GridHelper(size, divisions, 0x444444, 0x888888);
-scene.add(gridHelper);
-
-/////////////////////////////////////////////////////////
-
-const verts4D = generateTesseractVertices(100);
-const edges = generateTesseractEdges(verts4D);
-
-const positions = new Float32Array(edges.length * 2 * 3);
-const colors = new Float32Array(edges.length * 2 * 3);
-
-const geometry = new THREE.BufferGeometry();
-geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-const material = new THREE.LineBasicMaterial({ vertexColors: true });
-const tesseractLines = new THREE.LineSegments(geometry, material);
-scene.add(tesseractLines);
-
-// Pre-fill edge colors by axis
-function axisColor(axis) {
-    switch(axis) {
-        case 0: return [1,0,0]; // X-red
-        case 1: return [0,1,0]; // Y-green
-        case 2: return [0,0,1]; // Z-blue
-        case 3: return [1,1,0]; // W-yellow
-        default: return [1,1,1];
-    }
-}
-let ptr = 0;
-for (const [i1,i2] of edges) {
-    const v1 = verts4D[i1], v2 = verts4D[i2];
-    let axis = -1;
-    for (let k=0;k<4;k++) if(v1[k]!==v2[k]) { axis=k; break; }
-    const [r,g,b] = axisColor(axis);
-    colors[ptr++] = r; colors[ptr++] = g; colors[ptr++] = b;
-    colors[ptr++] = r; colors[ptr++] = g; colors[ptr++] = b;
-}
-geometry.attributes.color.needsUpdate = true;
-
-let camera4D = [0,0,0,0];
-function updateTesseract() {
-    let ptr = 0;
-    for (const [i1, i2] of edges) {
-        const rv1 = applyMat4ToVec4(tesseractRotationMat, verts4D[i1]);
-        const rv2 = applyMat4ToVec4(tesseractRotationMat, verts4D[i2]);
-
-        const p1 = project4Dto3D(rv1, [0,0,0,0]); // camera stays purely 3D, so cam4D = [0,0,0,0]
-        const p2 = project4Dto3D(rv2, [0,0,0,0]);
-
-        // positions[ptr++] = p1.x;
-        // positions[ptr++] = p1.y;
-        // positions[ptr++] = p1.z;
-        //
-        // positions[ptr++] = p2.x;
-        // positions[ptr++] = p2.y;
-        // positions[ptr++] = p2.z;
-
-        const tesseractOffset = new THREE.Vector3(0, 200, 0); // y = 15, above the grid
-        positions[ptr++] = p1.x + tesseractOffset.x;
-        positions[ptr++] = p1.y + tesseractOffset.y;
-        positions[ptr++] = p1.z + tesseractOffset.z;
-
-        positions[ptr++] = p2.x + tesseractOffset.x;
-        positions[ptr++] = p2.y + tesseractOffset.y;
-        positions[ptr++] = p2.z + tesseractOffset.z;
-
-    }
-    geometry.attributes.position.needsUpdate = true;
-}
-
-// 4x4 identity
+// 4D Identity Matrix
 function mat4Identity() {
     return [
         1,0,0,0,
@@ -108,7 +14,7 @@ function mat4Identity() {
     ];
 }
 
-// multiply two 4x4 matrices
+// Matrix Multiply (A * B)
 function mat4Multiply(a, b) {
     const out = new Array(16).fill(0);
     for (let r=0; r<4; r++)
@@ -118,7 +24,25 @@ function mat4Multiply(a, b) {
     return out;
 }
 
-// rotation matrix in plane (i,j)
+// Matrix Vector Multiply (M * v)
+function applyMat4ToVec4(m, v) {
+    const out = [0,0,0,0];
+    for (let i=0; i<4; i++) {
+        out[i] = m[i*4+0]*v[0] + m[i*4+1]*v[1] + m[i*4+2]*v[2] + m[i*4+3]*v[3];
+    }
+    return out;
+}
+
+// Transpose (For rotation matrices, Transpose === Inverse)
+function mat4Transpose(m) {
+    const out = new Array(16);
+    for(let r=0; r<4; r++)
+        for(let c=0; c<4; c++)
+            out[c*4+r] = m[r*4+c];
+    return out;
+}
+
+// Rotation Generators
 function rotationMatrix4(i, j, angle) {
     const R = mat4Identity();
     const c = Math.cos(angle);
@@ -128,128 +52,202 @@ function rotationMatrix4(i, j, angle) {
     return R;
 }
 
-let tesseractRotationMat = mat4Identity();
+// 4D -> 3D Stereographic Projection
+// We project relative to a "Camera" at 0,0,0 looking down W usually,
+// but since we transform points TO camera space first, we just project based on W.
+function project4Dto3D(v) {
+    const wFactor = 200; // Field of View / Depth factor
+    // Prevent division by zero or points behind the "retina"
+    const div = wFactor - v[3];
 
-let dragging = false;
-let lastX = 0;
-let lastY = 0;
-const sensitivity = 0.01;
+    if (Math.abs(div) < 0.001) return {x:v[0], y:v[1], z:v[2]}; // Safety
 
-renderer.domElement.addEventListener('pointerdown', (ev) => {
-    dragging = true;
-    lastX = ev.clientX;
-    lastY = ev.clientY;
-    ev.target.setPointerCapture(ev.pointerId);
-});
-renderer.domElement.addEventListener('pointermove', (ev) => {
-    if (!dragging) return;
-    const dx = ev.clientX - lastX;
-    const dy = ev.clientY - lastY;
-    lastX = ev.clientX;
-    lastY = ev.clientY;
+    const scale = wFactor / div;
+    return {
+        x: v[0] * scale,
+        y: v[1] * scale,
+        z: v[2] * scale
+    };
+}
 
-    // basic rotation
-    const a = dx * sensitivity;
-    const b = dy * sensitivity;
+// --- SCENE SETUP --------------------------------------------------------
 
-    let r1, r2;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+// We lock the ThreeJS camera. It acts as our "Eye" into the 3D slice.
+camera.position.set(0, 0, 200);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Grid to give reference
+const gridHelper = new THREE.GridHelper(500, 20, 0x444444, 0x222222);
+// We can rotate the grid 90deg so it looks like a "floor" relative to our perspective
+gridHelper.rotateX(Math.PI / 2);
+scene.add(gridHelper);
+
+// --- TESSERACT GENERATION -----------------------------------------------
+// (Re-implementing simple generation here to make snippet self-contained)
+function createTesseract(size) {
+    const vertices = [];
+    for(let i=0; i<16; i++) {
+        const x = (i & 1) ? size : -size;
+        const y = (i & 2) ? size : -size;
+        const z = (i & 4) ? size : -size;
+        const w = (i & 8) ? size : -size;
+        vertices.push([x,y,z,w]);
+    }
+    const edges = [];
+    for(let i=0; i<16; i++) {
+        for(let bit=0; bit<4; bit++) {
+            const neighbor = i ^ (1 << bit);
+            if(i < neighbor) edges.push([i, neighbor]);
+        }
+    }
+    return { vertices, edges };
+}
+
+const tesseract = createTesseract(50); // Radius 50
+const edges = tesseract.edges;
+const verts4D = tesseract.vertices;
+
+// Geometry Setup
+const positions = new Float32Array(edges.length * 2 * 3);
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+const material = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+const tesseractLines = new THREE.LineSegments(geometry, material);
+scene.add(tesseractLines);
+
+// --- 4D CAMERA SYSTEM ---------------------------------------------------
+
+const cam4D = {
+    position: [0, 0, -150, 0], // Start slightly back in Z
+    // The rotation matrix represents the camera's local axes (Right, Up, Forward, Ana)
+    rotation: mat4Identity()
+};
+
+function updateTesseract() {
+    // 1. Invert Camera Rotation (Transpose) to get World-to-View Matrix
+    const viewMat = mat4Transpose(cam4D.rotation);
+
+    let ptr = 0;
+    for (const [i1, i2] of edges) {
+        const v1 = verts4D[i1];
+        const v2 = verts4D[i2];
+
+        // STEP A: Relative Position (Vertex - CameraPos)
+        const rel1 = [
+            v1[0] - cam4D.position[0],
+            v1[1] - cam4D.position[1],
+            v1[2] - cam4D.position[2],
+            v1[3] - cam4D.position[3]
+        ];
+
+        const rel2 = [
+            v2[0] - cam4D.position[0],
+            v2[1] - cam4D.position[1],
+            v2[2] - cam4D.position[2],
+            v2[3] - cam4D.position[3]
+        ];
+
+        // STEP B: Rotate into Camera Local Space
+        const local1 = applyMat4ToVec4(viewMat, rel1);
+        const local2 = applyMat4ToVec4(viewMat, rel2);
+
+        // STEP C: Project 4D -> 3D
+        const p1 = project4Dto3D(local1);
+        const p2 = project4Dto3D(local2);
+
+        positions[ptr++] = p1.x; positions[ptr++] = p1.y; positions[ptr++] = p1.z;
+        positions[ptr++] = p2.x; positions[ptr++] = p2.y; positions[ptr++] = p2.z;
+    }
+    geometry.attributes.position.needsUpdate = true;
+}
+
+// --- CONTROLS -----------------------------------------------------------
+
+const keys = {
+    w: false, s: false, a: false, d: false, // 3D Move
+    q: false, e: false,                     // 4D Move (Ana/Kata)
+    ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false
+};
+
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keydown', e => keys[e.key] = true); // For Arrows
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+window.addEventListener('keyup', e => keys[e.key] = false);
+
+// Mouse Look Logic
+let isDragging = false;
+const mouseSensitivity = 0.005;
+const moveSpeed = 2.0;
+
+document.addEventListener('mousedown', () => isDragging = true);
+document.addEventListener('mouseup', () => isDragging = false);
+document.addEventListener('mousemove', (ev) => {
+    if(!isDragging) return;
+
+    const dx = ev.movementX * mouseSensitivity;
+    const dy = ev.movementY * mouseSensitivity;
+
+    let rX, rY;
+
+    // If SHIFT is held, we rotate the 4D planes (Looking into W)
     if (ev.shiftKey) {
-        // shift = rotate in W planes
-        r1 = rotationMatrix4(0, 3, a); // X-W
-        r2 = rotationMatrix4(1, 3, b); // Y-W
+        // Rotate X-W (Panic/Yaw in 4D) and Y-W (Tilt into 4D)
+        rX = rotationMatrix4(0, 3, dx);
+        rY = rotationMatrix4(1, 3, dy);
     } else {
-        // normal = rotate in 3D planes
-        r1 = rotationMatrix4(0,1,a); // X-Y
-        r2 = rotationMatrix4(0,2,b); // X-Z
+        // Normal 3D Look (Yaw and Pitch)
+        // Yaw = Rotate X-Z (Indices 0, 2)
+        // Pitch = Rotate Y-Z (Indices 1, 2)
+        rX = rotationMatrix4(0, 2, -dx);
+        rY = rotationMatrix4(1, 2, -dy);
     }
 
-    tesseractRotationMat = mat4Multiply(r2, mat4Multiply(r1, tesseractRotationMat));
-});
-renderer.domElement.addEventListener('pointerup', () => dragging = false);
-renderer.domElement.addEventListener('pointercancel', () => dragging = false);
-
-
-/////////////////////////////////////////////////////////
-
-// Movement
-const moveSpeed = 2;
-const keys = { w: false, a: false, s: false, d: false };
-
-// Rotation
-const rotationKeys = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
-const rotationSpeed = 0.02;
-
-// Event listeners
-document.addEventListener('keydown', (e) => {
-    const key = e.key.toLowerCase();
-    if (keys[key] !== undefined) keys[key] = true;
-    if (rotationKeys[e.key] !== undefined) rotationKeys[e.key] = true;
+    // Apply rotation to camera basis
+    // We multiply on the right to rotate relative to current local axes
+    cam4D.rotation = mat4Multiply(cam4D.rotation, rX);
+    cam4D.rotation = mat4Multiply(cam4D.rotation, rY);
 });
 
-document.addEventListener('keyup', (e) => {
-    const key = e.key.toLowerCase();
-    if (keys[key] !== undefined) keys[key] = false;
-    if (rotationKeys[e.key] !== undefined) rotationKeys[e.key] = false;
-});
 
-// Animation
+function updateCameraMovement() {
+    // Extract current local axes from camera matrix
+    // Col 0 = Right, Col 1 = Up, Col 2 = Forward, Col 3 = Ana
+    const m = cam4D.rotation;
+    const right = [m[0], m[4], m[8], m[12]];
+    const up    = [m[1], m[5], m[9], m[13]]; // Unused on keys but good to have
+    const fwd   = [m[2], m[6], m[10], m[14]];
+    const ana   = [m[3], m[7], m[11], m[15]];
+
+    const addVec = (v, scale) => {
+        cam4D.position[0] += v[0] * scale;
+        cam4D.position[1] += v[1] * scale;
+        cam4D.position[2] += v[2] * scale;
+        cam4D.position[3] += v[3] * scale;
+    };
+
+    if (keys.w) addVec(fwd, moveSpeed);
+    if (keys.s) addVec(fwd, -moveSpeed);
+    if (keys.d) addVec(right, moveSpeed); // Strafe Right
+    if (keys.a) addVec(right, -moveSpeed); // Strafe Left
+
+    // 4D Movement
+    if (keys.e) addVec(ana, moveSpeed); // Move "Into" 4D
+    if (keys.q) addVec(ana, -moveSpeed); // Move "Out of" 4D
+}
+
+// --- LOOP ---------------------------------------------------------------
+
 function animate() {
     requestAnimationFrame(animate);
-    updateCamera();
+    updateCameraMovement();
     updateTesseract();
-    updateTesseractRotation();
     renderer.render(scene, camera);
-}
-
-function updateCamera() {
-    // Rotation using quaternions
-    const quaternion = new THREE.Quaternion();
-    const pitchQuat = new THREE.Quaternion();
-    const yawQuat = new THREE.Quaternion();
-
-    // Yaw: rotate around world Y
-    if (rotationKeys.ArrowLeft) yawQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotationSpeed);
-    if (rotationKeys.ArrowRight) yawQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -rotationSpeed);
-
-    // Pitch: rotate around camera's local X
-    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-    if (rotationKeys.ArrowUp) pitchQuat.setFromAxisAngle(right, rotationSpeed);
-    if (rotationKeys.ArrowDown) pitchQuat.setFromAxisAngle(right, -rotationSpeed);
-
-    quaternion.multiplyQuaternions(yawQuat, pitchQuat);
-    camera.quaternion.multiplyQuaternions(quaternion, camera.quaternion);
-
-    // Movement in camera local space
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    const rightVec = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-
-    if (keys.w) camera.position.add(forward.clone().multiplyScalar(moveSpeed));
-    if (keys.s) camera.position.add(forward.clone().multiplyScalar(-moveSpeed));
-    if (keys.a) camera.position.add(rightVec.clone().multiplyScalar(-moveSpeed));
-    if (keys.d) camera.position.add(rightVec.clone().multiplyScalar(moveSpeed));
-}
-
-function updateTesseractRotation() {
-    let r1: number[], r2: number[];
-
-    if (rotationKeys.ArrowLeft || rotationKeys.ArrowRight || rotationKeys.ArrowUp || rotationKeys.ArrowDown) {
-        if (window.event?.shiftKey) {
-            const a = (rotationKeys.ArrowLeft ? rotationSpeed : 0) - (rotationKeys.ArrowRight ? rotationSpeed : 0);
-            const b = (rotationKeys.ArrowUp ? rotationSpeed : 0) - (rotationKeys.ArrowDown ? rotationSpeed : 0);
-
-            r1 = rotationMatrix4(0, 3, a); // X-W
-            r2 = rotationMatrix4(1, 3, b); // Y-W
-        } else {
-            // normal 3D rotation
-            const a = (rotationKeys.ArrowLeft ? rotationSpeed : 0) - (rotationKeys.ArrowRight ? rotationSpeed : 0);
-            const b = (rotationKeys.ArrowUp ? rotationSpeed : 0) - (rotationKeys.ArrowDown ? rotationSpeed : 0);
-
-            r1 = rotationMatrix4(0, 1, a); // X-Y
-            r2 = rotationMatrix4(0, 2, b); // X-Z
-        }
-
-        tesseractRotationMat = mat4Multiply(r2, mat4Multiply(r1, tesseractRotationMat));
-    }
 }
 
 animate();
